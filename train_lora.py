@@ -45,7 +45,7 @@ from utils import image_grid
 from transformers import CLIPTextModel, CLIPTokenizer
 
 import diffusers
-from diffusers import AutoencoderKL, DDPMScheduler, DiffusionPipeline, StableDiffusionPipeline, UNet2DConditionModel
+from diffusers import AutoencoderKL, DDPMScheduler, DiffusionPipeline, StableDiffusionPipeline, UNet2DConditionModel, AutoPipelineForImage2Image
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import cast_training_params, compute_snr
 from diffusers.utils import check_min_version, convert_state_dict_to_diffusers, is_wandb_available
@@ -599,7 +599,8 @@ def main():
             transforms.Normalize([0.5], [0.5]),
         ]
     )
-    dataset = LitDataset(args.train_data_path, args.train_json_path, pose_map, train_transforms)    
+    # pose map 어디서?
+    train_dataset = LitDataset(args.train_data_path, args.train_json_path, pose_map, train_transforms)    
     val_dataset = LitDataset(args.val_data_path, args.val_json_path, pose_map, train_transforms)
 
 
@@ -800,12 +801,12 @@ def main():
                     target = noise
                 elif noise_scheduler.config.prediction_type == "v_prediction":
                     # tgt이 다른 lighting에 대한 latent이므로, v prediction이나 x0 prediction을 사용해야 함.
-                    target = noise_scheduler.get_velocity(tgtlatents, noise, timesteps)
+                    target = noise_scheduler.get_velocity(tgt_latents, noise, timesteps)
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
                 # Predict the noise residual and compute loss
-                model_pred = unet(src_noisy_latents, timesteps, encoder_hidden_states, return_dict=False)[0]
+                model_pred = unet(noisy_src_latents, timesteps, encoder_hidden_states, return_dict=False)[0]
 
                 if args.snr_gamma is None:
                     loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
@@ -896,6 +897,13 @@ def main():
                 epoch % args.validation_epochs == 0
             ):
                 # create pipeline
+                # pipeline = DiffusionPipeline.from_pretrained(
+                #     args.pretrained_model_name_or_path,
+                #     unet=unwrap_model(unet),
+                #     revision=args.revision,
+                #     variant=args.variant,
+                #     torch_dtype=weight_dtype,
+                # )
                 pipeline = DiffusionPipeline.from_pretrained(
                     args.pretrained_model_name_or_path,
                     unet=unwrap_model(unet),
