@@ -45,7 +45,7 @@ from utils import image_grid
 from transformers import CLIPTextModel, CLIPTokenizer
 
 import diffusers
-from diffusers import AutoencoderKL, DDPMScheduler, DiffusionPipeline, StableDiffusionPipeline, UNet2DConditionModel, AutoPipelineForImage2Image
+from diffusers import AutoencoderKL, DDPMScheduler, DiffusionPipeline, StableDiffusionPipeline, UNet2DConditionModel,
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import cast_training_params, compute_snr
 from diffusers.utils import check_min_version, convert_state_dict_to_diffusers, is_wandb_available
@@ -56,6 +56,7 @@ from diffusers.utils.torch_utils import is_compiled_module
 # from ..ldm.modules.encoders.modules import LightFieldEncoder  # added
 from light_encoder import LightingEncoder
 from dataloader import LitDataset
+from utils.modifiedstablediffusionimg2imgpipeline import ModifiedStableDiffusionImg2ImgPipeline
 
 if is_wandb_available():
     import wandb
@@ -69,6 +70,7 @@ def log_validation(
     accelerator,
     epoch,
     is_final_validation=False,
+    val_dataloader=None,
     save_dir=None,
 ):
     logger.info(
@@ -186,6 +188,7 @@ def parse_args():
     )
     parser.add_argument("--train_data_path", type=str, default="/workspace/dataset/train")
     parser.add_argument("--val_data_path", type=str, default="/workspace/dataset/val")
+    parser.add_argument("--pose_data_path", type=str, default="/workspace/dataset/light_pos.npy")
     parser.add_argument("--train_json_path", type=str, default="/workspace/dataset/preprocess/train.json")
     # parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument(
@@ -492,6 +495,7 @@ def main():
         args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision
     )
     light_encoder = LightingEncoder() # load light encoder
+    light_encoder.train()
     vae = AutoencoderKL.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant
     )
@@ -600,8 +604,8 @@ def main():
         ]
     )
     # pose map 어디서?
-    train_dataset = LitDataset(args.train_data_path, args.train_json_path, pose_map, train_transforms)    
-    val_dataset = LitDataset(args.val_data_path, args.val_json_path, pose_map, train_transforms)
+    train_dataset = LitDataset(args.train_data_path, args.train_json_path, args.pose_data_path, train_transforms)    
+    val_dataset = LitDataset(args.val_data_path, args.val_json_path, args.pose_data_path, train_transforms)
 
 
     # # Preprocessing the datasets.
@@ -658,6 +662,12 @@ def main():
         shuffle=True,
         # collate_fn=collate_fn, # 불필요하다고 판단됨. 이미 dataset에서 처리함.
         batch_size=args.train_batch_size,
+        num_workers=args.dataloader_num_workers,
+    )
+    val_dataloader = torch.utils.data.DataLoader(
+        val_dataset,
+        shuffle=False,
+        batch_size=args.val_batch_size,
         num_workers=args.dataloader_num_workers,
     )
     ###################
@@ -893,7 +903,7 @@ def main():
 
         if accelerator.is_main_process:
             if (
-                args.validation_prompt is not None and 
+                args.val_data_path is not None and 
                 epoch % args.validation_epochs == 0
             ):
                 # create pipeline
@@ -904,22 +914,28 @@ def main():
                 #     variant=args.variant,
                 #     torch_dtype=weight_dtype,
                 # )
-                pipeline = DiffusionPipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    unet=unwrap_model(unet),
-                    revision=args.revision,
-                    variant=args.variant,
-                    torch_dtype=weight_dtype,
-                )
-                images = log_validation(
-                    pipeline, 
-                    args, 
-                    accelerator, 
-                    epoch,
-                    save_dir=os.path.join(args.output_dir, "validation")
-                )
+                with torch.no_grad():
+                    pipeline = ModifiedStableDiffusionImg2ImgPipeline.from_pretrained(
+                        args.pretrained_model_name_or_path,
+                        unet=unwrap_model(unet),
+                        revision=args.revision,
+                        variant=args.variant,
+                        torch_dtype=weight_dtype,
+                    )
+                    light_encoder.eval()
+                    pipeline.add_light_encoder(light_encoder)
+                    
+                    images = log_validation(
+                        pipeline, 
+                        args, 
+                        accelerator, 
+                        epoch,
+                        val_dataloader,
+                        save_dir=os.path.join(args.output_dir, "validation")
+                    )
 
-                del pipeline
+                    del pipeline
+                    light_encoder.train()
                 torch.cuda.empty_cache()
 
     # Save the lora layers

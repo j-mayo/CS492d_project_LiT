@@ -167,7 +167,7 @@ def retrieve_timesteps(
         timesteps = scheduler.timesteps
     return timesteps, num_inference_steps
 
-
+# TODO : light encoder와 우리 task에 맞게 inference pipeline 수정
 class ModifiedStableDiffusionImg2ImgPipeline(
     DiffusionPipeline,
     StableDiffusionMixin,
@@ -306,6 +306,9 @@ class ModifiedStableDiffusionImg2ImgPipeline(
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.register_to_config(requires_safety_checker=requires_safety_checker)
 
+    def add_light_encoder(self, light_encoder):
+        self.light_encoder = light_encoder
+
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline._encode_prompt
     def _encode_prompt(
         self,
@@ -338,6 +341,38 @@ class ModifiedStableDiffusionImg2ImgPipeline(
         prompt_embeds = torch.cat([prompt_embeds_tuple[1], prompt_embeds_tuple[0]])
 
         return prompt_embeds
+    
+    def encode_light(
+        self, 
+        light, 
+        pose, 
+        device, 
+        do_classifier_free_guidance, 
+        negative_light=None, 
+        negative_pose=None,
+        num_images_per_prompt=1,
+    ):  
+        light = light.to(device)
+        pose = pose.to(device)
+        light_embeds = self.light_encoder(light, pose)
+        light_embeds = light_embeds.to(dtype=self.light_encoder.dtype, device=device)
+        
+        bs_embed, seq_len, _ = light_embeds.shape
+        # duplicate text embeddings for each generation per prompt, using mps friendly method
+        light_embeds = light_embeds.repeat(1, num_images_per_prompt, 1)
+        light_embeds = light_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
+        
+        negative_light_embeds = None
+        if do_classifier_free_guidance:
+            negative_light_embeds = self.light_encoder(negative_light, negative_pose)
+            negative_light_embeds = negative_light_embeds.to(dtype=self.light_encoder.dtype, device=device)
+        
+            bs_embed, seq_len, _ = negative_light_embeds.shape
+            # duplicate text embeddings for each generation per prompt, using mps friendly method
+            negative_light_embeds = negative_light_embeds.repeat(1, num_images_per_prompt, 1)
+            negative_light_embeds = negative_light_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
+
+        return light_embeds, negative_light_embeds
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.encode_prompt
     def encode_prompt(
@@ -646,6 +681,8 @@ class ModifiedStableDiffusionImg2ImgPipeline(
     def check_inputs(
         self,
         prompt,
+        light_conditioning,
+        pose_conditioning,
         strength,
         callback_steps,
         negative_prompt=None,
@@ -681,6 +718,15 @@ class ModifiedStableDiffusionImg2ImgPipeline(
             )
         elif prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
             raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
+
+        if light_conditioning is None or pose_conditioning is None:
+            raise ValueError("light_conditioning and pose_conditioning cannot be None")
+        
+        elif not isinstance(light_conditioning, torch.Tensor) or not isinstance(pose_conditioning, torch.Tensor):
+            raise ValueError("light_conditioning and pose_conditioning must be torch.Tensor")
+        
+        elif light_conditioning.shape[0] != pose_conditioning.shape[0]:
+            raise ValueError("light_conditioning and pose_conditioning must have the same batch size")
 
         if negative_prompt is not None and negative_prompt_embeds is not None:
             raise ValueError(
@@ -844,6 +890,10 @@ class ModifiedStableDiffusionImg2ImgPipeline(
         self,
         prompt: Union[str, List[str]] = None,
         image: PipelineImageInput = None,
+        light_conditioning: Optional[torch.Tensor] = None, # added
+        pose_conditioning: Optional[torch.Tensor] = None, # added
+        negative_light_conditioning: Optional[torch.Tensor] = None, # added
+        negative_pose_conditioning: Optional[torch.Tensor] = None, # added
         strength: float = 0.8,
         num_inference_steps: Optional[int] = 50,
         timesteps: List[int] = None,
@@ -974,6 +1024,8 @@ class ModifiedStableDiffusionImg2ImgPipeline(
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
             prompt,
+            light_conditioning,
+            pose_conditioning,
             strength,
             callback_steps,
             negative_prompt,
@@ -1003,22 +1055,25 @@ class ModifiedStableDiffusionImg2ImgPipeline(
         text_encoder_lora_scale = (
             self.cross_attention_kwargs.get("scale", None) if self.cross_attention_kwargs is not None else None
         )
-        prompt_embeds, negative_prompt_embeds = self.encode_prompt(
-            prompt,
-            device,
-            num_images_per_prompt,
-            self.do_classifier_free_guidance,
-            negative_prompt,
-            prompt_embeds=prompt_embeds,
-            negative_prompt_embeds=negative_prompt_embeds,
-            lora_scale=text_encoder_lora_scale,
-            clip_skip=self.clip_skip,
-        )
+        # prompt를 이용할지 말지 아직은 모르겠음
+        # prompt_embeds, negative_prompt_embeds = self.encode_prompt(
+        #     prompt,
+        #     device,
+        #     num_images_per_prompt,
+        #     self.do_classifier_free_guidance,
+        #     negative_prompt,
+        #     prompt_embeds=prompt_embeds,
+        #     negative_prompt_embeds=negative_prompt_embeds,
+        #     lora_scale=text_encoder_lora_scale,
+        #     clip_skip=self.clip_skip,
+        # )
+        prompt_embeds, negative_prompt_embeds = self.encode_light(light_conditioning, pose_conditioning, device, self.do_classifier_free_guidance, negative_light_conditioning, negative_pose_conditioning)
         # For classifier free guidance, we need to do two forward passes.
         # Here we concatenate the unconditional and text embeddings into a single batch
         # to avoid doing two forward passes
         if self.do_classifier_free_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
+            # 여기서는 src의 lighting이 negative, tgt의 lighting이 그냥 embedding
 
         if ip_adapter_image is not None or ip_adapter_image_embeds is not None:
             image_embeds = self.prepare_ip_adapter_image_embeds(
