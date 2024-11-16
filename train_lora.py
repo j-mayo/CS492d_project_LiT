@@ -90,36 +90,55 @@ def log_validation(
         autocast_ctx = torch.autocast(accelerator.device.type)
 
     image_logs = []
-
+    val_error_list = []
     with autocast_ctx:
-        for _ in range(args.num_validation_images):
+        # for _ in range(args.num_validation_images):
+        #     image = pipeline(
+        #         args.validation_prompt, 
+        #         num_inference_steps=30, 
+        #         generator=generator
+        #     ).images[0]
+        #     images.append(image)
+        
+        # image_logs.append(
+        #     {
+        #         "images": images, 
+        #         "validation_prompt": args.validation_prompt
+        #     }
+        # )
+        
+        for batch in val_dataloader:
             image = pipeline(
-                args.validation_prompt, 
-                num_inference_steps=30, 
-                generator=generator
+                image=batch["src_img"],
+                light_conditioning=batch["tgt_condition"],
+                pose_conditioning=batch["pose"],
+                negative_light_conditioning=batch["src_condition"],
+                negative_pose_conditioning=batch["pose"]
             ).images[0]
             images.append(image)
-        
-        image_logs.append(
-            {
-                "images": images, 
-                "validation_prompt": args.validation_prompt
-            }
-        )
-    
+            
+            val_error = torch.mean((batch["tgt_img"] - image)**2).item()
+            val_error_list.append(val_error)
+            image_logs.append(
+                {
+                    "images": [batch["tgt_img"], image],
+                    "val_error": val_error
+                }
+            )
     # Save the concatenated validation output
     if save_dir is not None:
         image_list = []
         for image_log in image_logs:
-            images = image_log["images"]
-            image_concat = image_grid(images, 1, len(images))
+            tgt_image = image_log["images"][0]
+            image = image_log["images"][1]
+            image_concat = image_grid([tgt_image, image], 1, 2)
             image_list.append(image_concat)
         
         image_val_full = image_grid(image_list, len(image_list), 1)
         image_val_full.save(
             os.path.join(save_dir, f"epoch_{epoch:06d}.png")
         )
-
+    print(f"Epoch {epoch} | Validation error: {torch.mean(torch.tensor(val_error_list))}")
     for tracker in accelerator.trackers:
         phase_name = "test" if is_final_validation else "validation"
         
