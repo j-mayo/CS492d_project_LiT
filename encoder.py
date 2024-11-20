@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import kornia
 #from torch.utils.checkpoint import checkpoint
+from modules import ConvReduceModule
 
 
 def default(val, d):
@@ -78,19 +79,26 @@ class ImageEmbedder(nn.Module):
 
 
 class LightingEncoder(AbstractEncoder):
-    def __init__(self, light_pos_maps=None, device="cuda"):
+    def __init__(self, num_layers, input_channels, embedding_dim, num_poses, light_pos_maps=None, device="cuda"):
         super().__init__()
         # TODO light position -> 2d image level로 light map을 전사하기
-        self.light_condition_table = nn.parameter
-        self.light_condition_encoder = ImageEmbedder(device, max_length=clip_max_length)
-        self.t5_encoder = FrozenT5Embedder(t5_version, device, max_length=t5_max_length)
-        print(f"{self.clip_encoder.__class__.__name__} has {count_params(self.clip_encoder) * 1.e-6:.2f} M parameters, "
-              f"{self.t5_encoder.__class__.__name__} comes with {count_params(self.t5_encoder) * 1.e-6:.2f} M params.")
+        if light_pos_maps is None:
+            self.register_buffer('light_condition_table', nn.Parameter(torch.Tensor(), requires_grad=False))
+        else:
+            self.register_buffer('light_condition_table', nn.Parameter(light_pos_maps, requires_grad=False))
 
-    def encode(self, text):
-        return self(text)
+        self.light_condition_table.to(device)
+        self.light_module = ConvReduceModule(num_layers, input_channels, embedding_dim, num_poses).to(device)
+        #self.light_condition_encoder = ImageEmbedder(device, light_module)
+        # print(f"{self.light_module.__class__.__name__} has {count_params(self.light_condition_encoder) * 1.e-6:.2f} M parameters, ")
 
-    def forward(self, text):
-        clip_z = self.clip_encoder.encode(text)
-        t5_z = self.t5_encoder.encode(text)
-        return [clip_z, t5_z]
+    def lookup_light_condition(self, label):
+        return self.light_condition_table[label.to(self.light_condition_table.device).long()-1]
+
+    def encode(self, light_label, angle_label):
+        light_map = self.lookup_light_condition(light_label)
+        light_cond = self.light_module(light_map, angle_label)
+        return light_cond
+
+    def forward(self, light_label, angle_label):
+        return self.encode(light_label, angle_label)

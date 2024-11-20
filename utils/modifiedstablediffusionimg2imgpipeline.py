@@ -39,7 +39,7 @@ from diffusers.utils import (
 )
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline, StableDiffusionMixin
-from diffusers import StableDiffusionPipelineOutput
+from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -355,22 +355,22 @@ class ModifiedStableDiffusionImg2ImgPipeline(
         light = light.to(device)
         pose = pose.to(device)
         light_embeds = self.light_encoder(light, pose)
-        light_embeds = light_embeds.to(dtype=self.light_encoder.dtype, device=device)
+        light_embeds = light_embeds.to(device=device)
         
-        bs_embed, seq_len, _ = light_embeds.shape
+        #bs_embed, n_feat = light_embeds.shape
         # duplicate text embeddings for each generation per prompt, using mps friendly method
-        light_embeds = light_embeds.repeat(1, num_images_per_prompt, 1)
-        light_embeds = light_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
+        #light_embeds = light_embeds.repeat(1, num_images_per_prompt, 1)
+        #light_embeds = light_embeds.view(bs_embed * num_images_per_prompt, n_feat)
         
         negative_light_embeds = None
         if do_classifier_free_guidance:
             negative_light_embeds = self.light_encoder(negative_light, negative_pose)
-            negative_light_embeds = negative_light_embeds.to(dtype=self.light_encoder.dtype, device=device)
+            negative_light_embeds = negative_light_embeds.to(device=device)
         
-            bs_embed, seq_len, _ = negative_light_embeds.shape
+            #bs_embed, n_feat = negative_light_embeds.shape
             # duplicate text embeddings for each generation per prompt, using mps friendly method
-            negative_light_embeds = negative_light_embeds.repeat(1, num_images_per_prompt, 1)
-            negative_light_embeds = negative_light_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
+            #negative_light_embeds = negative_light_embeds.repeat(1, num_images_per_prompt, 1)
+            #negative_light_embeds = negative_light_embeds.view(bs_embed * num_images_per_prompt, n_feat)
 
         return light_embeds, negative_light_embeds
 
@@ -707,17 +707,17 @@ class ModifiedStableDiffusionImg2ImgPipeline(
             raise ValueError(
                 f"`callback_on_step_end_tensor_inputs` has to be in {self._callback_tensor_inputs}, but found {[k for k in callback_on_step_end_tensor_inputs if k not in self._callback_tensor_inputs]}"
             )
-        if prompt is not None and prompt_embeds is not None:
-            raise ValueError(
-                f"Cannot forward both `prompt`: {prompt} and `prompt_embeds`: {prompt_embeds}. Please make sure to"
-                " only forward one of the two."
-            )
-        elif prompt is None and prompt_embeds is None:
-            raise ValueError(
-                "Provide either `prompt` or `prompt_embeds`. Cannot leave both `prompt` and `prompt_embeds` undefined."
-            )
-        elif prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
-            raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
+        # if prompt is not None and prompt_embeds is not None:
+        #     raise ValueError(
+        #         f"Cannot forward both `prompt`: {prompt} and `prompt_embeds`: {prompt_embeds}. Please make sure to"
+        #         " only forward one of the two."
+        #     )
+        #elif prompt is None and prompt_embeds is None:
+        #    raise ValueError(
+        #        "Provide either `prompt` or `prompt_embeds`. Cannot leave both `prompt` and `prompt_embeds` undefined."
+        #    )
+        # elif prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
+        #     raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
 
         if light_conditioning is None or pose_conditioning is None:
             raise ValueError("light_conditioning and pose_conditioning cannot be None")
@@ -1047,7 +1047,8 @@ class ModifiedStableDiffusionImg2ImgPipeline(
         elif prompt is not None and isinstance(prompt, list):
             batch_size = len(prompt)
         else:
-            batch_size = prompt_embeds.shape[0]
+            #batch_size = prompt_embeds.shape[0]
+            batch_size = light_conditioning.shape[0]
 
         device = self._execution_device
 
@@ -1067,7 +1068,11 @@ class ModifiedStableDiffusionImg2ImgPipeline(
         #     lora_scale=text_encoder_lora_scale,
         #     clip_skip=self.clip_skip,
         # )
-        prompt_embeds, negative_prompt_embeds = self.encode_light(light_conditioning, pose_conditioning, device, self.do_classifier_free_guidance, negative_light_conditioning, negative_pose_conditioning)
+        prompt_embeds, negative_prompt_embeds = self.encode_light(light_conditioning,
+                                                                  pose_conditioning, device,
+                                                                  self.do_classifier_free_guidance,
+                                                                  negative_light_conditioning,
+                                                                  negative_pose_conditioning)
         # For classifier free guidance, we need to do two forward passes.
         # Here we concatenate the unconditional and text embeddings into a single batch
         # to avoid doing two forward passes
