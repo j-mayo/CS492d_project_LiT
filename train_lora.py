@@ -446,6 +446,8 @@ def parse_args():
         help=("The dimension of the LoRA update matrices."),
     )
     parser.add_argument("--lighting_layers", type=int, default=8)
+    
+    parser.add_argument("--cfg_scale", type=float, default=3.5)
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -712,7 +714,7 @@ def main():
         shuffle=False,
         batch_size=args.val_batch_size,
         num_workers=args.dataloader_num_workers,
-    )
+    ) if val_dataset is not None else None
     ###################
     # Scheduler and math around the number of training steps.
     # Check the PR https://github.com/huggingface/diffusers/pull/8312 for detailed explanation.
@@ -809,7 +811,7 @@ def main():
         unet.train()
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
-            break
+            
             with accelerator.accumulate(unet):
 
                 # Convert src images to latent space
@@ -836,6 +838,12 @@ def main():
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
                 noisy_src_latents = noise_scheduler.add_noise(src_latents, noise, timesteps)
+                
+                # cfg training
+                noisy_src_latents = torch.cat((noisy_src_latents, noisy_src_latents), dim=0)
+                # tgt_latents = torch.cat((tgt_latents, tgt_latents), dim=0)
+                concated_timesteps = torch.cat((timesteps, timesteps), dim=0)
+                # concated_noise = torch.cat((noise, noise), dim=0)
                 # noisy_tgt_latents = noise_scheduler.add_noise(tgt_latents, noise, timesteps)
 
                 # Get the light embedding for conditioning
@@ -849,6 +857,9 @@ def main():
                 # print(src_encoder_hidden_states.shape, src_encoder_hidden_states.device, tgt_encoder_hidden_states.shape, tgt_encoder_hidden_states.device)
                 # import pdb; pdb.set_trace()
                 encoder_hidden_states = torch.cat((src_encoder_hidden_states, tgt_encoder_hidden_states), dim=0) # concat embeddings
+                
+                encoder_hidden_states = encoder_hidden_states.squeeze(1)
+                # print(encoder_hidden_states.shape)
                 #import pdb; pdb.set_trace()
                 # encoder는 src의 lighting과 tgt lighting을 전부 받도록 고려함... 일단은.
 
@@ -867,7 +878,14 @@ def main():
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
                 # Predict the noise residual and compute loss
-                model_pred = unet(noisy_src_latents, timesteps, encoder_hidden_states, return_dict=False)[0]
+                # print(noisy_src_latents.shape, concated_timesteps.shape, encoder_hidden_states.shape)
+                # import pdb; pdb.set_trace()
+                model_pred = unet(noisy_src_latents, concated_timesteps, encoder_hidden_states, return_dict=False)[0]
+                # print(model_pred.shape)
+                
+                # apply cfg
+                model_pred = (1 + args.cfg_scale) * model_pred[bsz:, :] - args.cfg_scale * model_pred[:bsz, :]
+                # import pdb; pdb.set_trace()
 
                 if args.snr_gamma is None:
                     loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
