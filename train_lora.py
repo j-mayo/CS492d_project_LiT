@@ -41,11 +41,11 @@ from peft import LoraConfig
 from peft.utils import get_peft_model_state_dict
 from torchvision import transforms
 from tqdm.auto import tqdm
-from utils import image_grid
+from utils.utils import image_grid
 from transformers import CLIPTextModel, CLIPTokenizer
 
 import diffusers
-from diffusers import AutoencoderKL, DDPMScheduler, DiffusionPipeline, StableDiffusionPipeline, UNet2DConditionModel,
+from diffusers import AutoencoderKL, DDPMScheduler, DiffusionPipeline, StableDiffusionPipeline, UNet2DConditionModel
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import cast_training_params, compute_snr
 from diffusers.utils import check_min_version, convert_state_dict_to_diffusers, is_wandb_available
@@ -54,8 +54,9 @@ from diffusers.utils.import_utils import is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
 
 # from ..ldm.modules.encoders.modules import LightFieldEncoder  # added
-from light_encoder import LightingEncoder
-from dataloader import LitDataset
+from glob import glob
+from encoder import LightingEncoder
+from utils.dataloader import LitDataset
 from utils.modifiedstablediffusionimg2imgpipeline import ModifiedStableDiffusionImg2ImgPipeline
 
 if is_wandb_available():
@@ -71,6 +72,7 @@ def log_validation(
     epoch,
     is_final_validation=False,
     val_dataloader=None,
+    batch=None,
     save_dir=None,
 ):
     logger.info(
@@ -106,10 +108,10 @@ def log_validation(
         #         "validation_prompt": args.validation_prompt
         #     }
         # )
-        
-        for batch in val_dataloader:
-            image = pipeline(
-                image=batch["src_img"],
+        if val_dataloader is not None:
+            for batch in val_dataloader:
+                image = pipeline(
+                    image=batch["src_img"],
                 light_conditioning=batch["tgt_condition"],
                 pose_conditioning=batch["pose"],
                 negative_light_conditioning=batch["src_condition"],
@@ -123,8 +125,14 @@ def log_validation(
                 {
                     "images": [batch["tgt_img"], image],
                     "val_error": val_error
-                }
-            )
+                    }
+                )
+        elif batch is not None:
+            image = pipeline(
+                image=batch["src_img"],
+                light_conditioning=batch["tgt_condition"],
+                pose_conditioning=batch["pose"],
+            ).images[0]
     # Save the concatenated validation output
     if save_dir is not None:
         image_list = []
@@ -139,21 +147,21 @@ def log_validation(
             os.path.join(save_dir, f"epoch_{epoch:06d}.png")
         )
     print(f"Epoch {epoch} | Validation error: {torch.mean(torch.tensor(val_error_list))}")
-    for tracker in accelerator.trackers:
-        phase_name = "test" if is_final_validation else "validation"
+    # for tracker in accelerator.trackers:
+    #     phase_name = "test" if is_final_validation else "validation"
         
-        if tracker.name == "tensorboard":
-            np_images = np.stack([np.asarray(img) for img in images])
-            tracker.writer.add_images(phase_name, np_images, epoch, dataformats="NHWC")
+    #     if tracker.name == "tensorboard":
+    #         np_images = np.stack([np.asarray(img) for img in images])
+    #         tracker.writer.add_images(phase_name, np_images, epoch, dataformats="NHWC")
         
-        if tracker.name == "wandb":
-            tracker.log(
-                {
-                    phase_name: [
-                        wandb.Image(image, caption=f"{i}: {args.validation_prompt}") for i, image in enumerate(images)
-                    ]
-                }
-            )
+    #     if tracker.name == "wandb":
+    #         tracker.log(
+    #             {
+    #                 phase_name: [
+    #                     wandb.Image(image, caption=f"{i}: {args.validation_prompt}") for i, image in enumerate(images)
+    #                 ]
+    #             }
+    #         )
     return images
 
 
@@ -209,6 +217,7 @@ def parse_args():
     parser.add_argument("--val_data_path", type=str, default="/workspace/dataset/val")
     parser.add_argument("--pose_data_path", type=str, default="/workspace/dataset/light_pos.npy")
     parser.add_argument("--train_json_path", type=str, default="/workspace/dataset/preprocess/train.json")
+    parser.add_argument("--val_json_path", type=str, default=None)
     # parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument(
         "--image_column", type=str, default="image", help="The column of the dataset containing an image."
@@ -285,6 +294,7 @@ def parse_args():
     parser.add_argument(
         "--train_batch_size", type=int, default=16, help="Batch size (per device) for the training dataloader."
     )
+    parser.add_argument("--val_batch_size", type=int, default=4, help="Batch size (per device) for the validation dataloader.")
     parser.add_argument("--num_train_epochs", type=int, default=100)
     parser.add_argument(
         "--max_train_steps",
@@ -435,6 +445,7 @@ def parse_args():
         default=4,
         help=("The dimension of the LoRA update matrices."),
     )
+    parser.add_argument("--lighting_layers", type=int, default=8)
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -442,7 +453,7 @@ def parse_args():
         args.local_rank = env_local_rank
 
     # Sanity checks
-    if args.dataset_name is None and args.train_data_dir is None:
+    if args.train_data_path is None and args.val_data_path is None:
         raise ValueError("Need either a dataset name or a training folder.")
 
     return args
@@ -506,14 +517,24 @@ def main():
     # config file 이용 어떻게? 
 
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
-    noise_scheduler.config.prediction_type = "v_prediction" # v prediction?
-    tokenizer = CLIPTokenizer.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision
-    )
-    text_encoder = CLIPTextModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision
-    )
-    light_encoder = LightingEncoder() # load light encoder
+    noise_scheduler.config.prediction_type = "v_prediction" # v prediction? noise보다는 x0가 나아보이는데 일단 옵션이 없어서 이걸로...
+    #tokenizer = CLIPTokenizer.from_pretrained(
+    #    args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision
+    #)
+    #text_encoder = CLIPTextModel.from_pretrained(
+    #    args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision
+    #)
+    light_map = []
+    for flight in glob("/workspace/dataset/generate_light_gt_sg/hdrnpys/*"):
+        light_map.append(np.load(flight))
+    light_map = torch.from_numpy(np.array(light_map))
+    light_pos_maps = torch.stack(tuple(light_map), dim=0).permute(0, 3, 1, 2) # n_labels, 3, 
+    # print(light_pos_maps.shape)
+    light_encoder = LightingEncoder(num_layers=args.lighting_layers,
+                                    input_channels=3,
+                                    embedding_dim=1024, # Clip embedding dim은 768입니다
+                                    num_poses=10,
+                                    light_pos_maps=light_pos_maps) # load light encoder
     light_encoder.train()
     vae = AutoencoderKL.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant
@@ -524,7 +545,7 @@ def main():
     # freeze parameters of models to save more memory
     unet.requires_grad_(False)
     vae.requires_grad_(False)
-    text_encoder.requires_grad_(False)
+    #text_encoder.requires_grad_(False)
 
     # For mixed precision training we cast all non-trainable weights (vae, non-lora text_encoder and non-lora unet) to half-precision
     # as these weights are only used for inference, keeping weights in full precision is not required.
@@ -623,8 +644,11 @@ def main():
         ]
     )
     # pose map 어디서?
-    train_dataset = LitDataset(args.train_data_path, args.train_json_path, args.pose_data_path, train_transforms)    
-    val_dataset = LitDataset(args.val_data_path, args.val_json_path, args.pose_data_path, train_transforms)
+    pose_map = {
+        "NA3": 0, "NE7": 1, "CB5": 2, "CF8": 3, "NA7": 4, "CC7": 5, "CA2": 6, "NE1": 7, "NC3": 8, "CE2": 9
+    }
+    train_dataset = LitDataset(args.train_data_path, args.train_json_path, pose_map, train_transforms)    
+    val_dataset = LitDataset(args.val_data_path, args.val_json_path, pose_map, train_transforms) if args.val_json_path is not None and args.val_data_path is not None else None
 
 
     # # Preprocessing the datasets.
@@ -785,6 +809,7 @@ def main():
         unet.train()
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
+            break
             with accelerator.accumulate(unet):
 
                 # Convert src images to latent space
@@ -815,12 +840,19 @@ def main():
 
                 # Get the light embedding for conditioning
                 # encoder_hidden_states = text_encoder(batch["input_ids"], return_dict=False)[0]
-                # TODO - implement light embedding
-                src_encoder_hidden_states = light_encoder(batch["src_condition"], batch["pose"])
-                tgt_encoder_hidden_states = light_encoder(batch["tgt_condition"], batch["pose"])
-                encoder_hidden_states = torch.cat([src_encoder_hidden_states, tgt_encoder_hidden_states], dim=0) # concat embeddings
 
-                # TODO - 여기부터.
+                src_cond, tgt_cond = batch["src_condition"], batch["tgt_condition"]
+                src_encoder_hidden_states = light_encoder(batch["src_condition"], batch["pose"])
+                src_encoder_hidden_states = src_encoder_hidden_states.unsqueeze(1)
+                tgt_encoder_hidden_states = light_encoder(batch["tgt_condition"], batch["pose"])
+                tgt_encoder_hidden_states = tgt_encoder_hidden_states.unsqueeze(1)
+                # print(src_encoder_hidden_states.shape, src_encoder_hidden_states.device, tgt_encoder_hidden_states.shape, tgt_encoder_hidden_states.device)
+                # import pdb; pdb.set_trace()
+                encoder_hidden_states = torch.cat((src_encoder_hidden_states, tgt_encoder_hidden_states), dim=0) # concat embeddings
+                #import pdb; pdb.set_trace()
+                # encoder는 src의 lighting과 tgt lighting을 전부 받도록 고려함... 일단은.
+
+
                 # Get the target for loss depending on the prediction type
                 if args.prediction_type is not None:
                     # set prediction_type of scheduler if defined
@@ -829,7 +861,7 @@ def main():
                 if noise_scheduler.config.prediction_type == "epsilon":
                     target = noise
                 elif noise_scheduler.config.prediction_type == "v_prediction":
-                    # tgt이 다른 lighting에 대한 latent이므로, v prediction이나 x0 prediction을 사용해야 함.
+                    # tgt이 다른 lighting에 대한 latent이므로, v prediction이나 x0 prediction을 사용해야 하지 않을까? img 단에서의 loss를 사용하는 편이 좋아 보인다.
                     target = noise_scheduler.get_velocity(tgt_latents, noise, timesteps)
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
@@ -922,7 +954,7 @@ def main():
 
         if accelerator.is_main_process:
             if (
-                args.val_data_path is not None and 
+                # val_dataloader is not None and 
                 epoch % args.validation_epochs == 0
             ):
                 # create pipeline
@@ -949,7 +981,8 @@ def main():
                         args, 
                         accelerator, 
                         epoch,
-                        val_dataloader,
+                        batch=batch,
+                        #guidance_scale=0.0,
                         save_dir=os.path.join(args.output_dir, "validation")
                     )
 
@@ -973,26 +1006,49 @@ def main():
 
         # Final inference
         # Load previous pipeline
-        if args.validation_prompt is not None:
-            pipeline = DiffusionPipeline.from_pretrained(
-                args.pretrained_model_name_or_path,
-                revision=args.revision,
-                variant=args.variant,
-                torch_dtype=weight_dtype,
-            )
+        # use val data.
+        if val_dataloader is not None:
+            with torch.no_grad():
+                    pipeline = ModifiedStableDiffusionImg2ImgPipeline.from_pretrained(
+                        args.pretrained_model_name_or_path,
+                        revision=args.revision,
+                        variant=args.variant,
+                        torch_dtype=weight_dtype,
+                    )
+                    light_encoder.eval()
+                    pipeline.load_lora_weights(args.output_dir)
+                    pipeline.add_light_encoder(light_encoder)
+                    
+                    images = log_validation(
+                        pipeline, 
+                        args, 
+                        accelerator, 
+                        epoch,
+                        val_dataloader=val_dataloader,
+                        save_dir=os.path.join(args.output_dir, "validation")
+                    )
 
-            # load attention processors
-            pipeline.load_lora_weights(args.output_dir)
+                    del pipeline
 
-            # run inference
-            images = log_validation(
-                pipeline, 
-                args, 
-                accelerator, 
-                epoch, 
-                is_final_validation=True,
-                save_dir=os.path.join(args.output_dir, "validation")
-            )
+            # pipeline = DiffusionPipeline.from_pretrained(
+            #     args.pretrained_model_name_or_path,
+            #     revision=args.revision,
+            #     variant=args.variant,
+            #     torch_dtype=weight_dtype,
+            # )
+
+            # # load attention processors
+            # pipeline.load_lora_weights(args.output_dir)
+
+            # # run inference
+            # images = log_validation(
+            #     pipeline, 
+            #     args, 
+            #     accelerator, 
+            #     epoch, 
+            #     is_final_validation=True,
+            #     save_dir=os.path.join(args.output_dir, "validation")
+            # )
 
     accelerator.end_training()
 
