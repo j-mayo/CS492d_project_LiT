@@ -24,5 +24,6 @@ accelerate launch --mixed_precision="no" train_lora.py \
   --seed=42 \
   --checkpoints_total_limit 2 \
   --validation_prompt="a cute bear" \
-  --lighting_layers=8 \
+  --lighting_layers=4 \
+  --cfg_scale=2 \
     # --val_json_path=$VAL_JSON_PATH \

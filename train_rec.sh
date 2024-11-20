@@ -2,6 +2,7 @@ export MODEL_NAME="/workspace/Project/stable-diffusion-2-1-base"
 export TRAIN_DATA_PATH="/workspace/dataset/train"
 export VAL_DATA_PATH="/workspace/dataset/val"
 export TRAIN_JSON_PATH="/workspace/dataset/preprocess/train.json"
+export VAL_JSON_PATH="/workspace/dataset/preprocess/eval.json"
 export OUTPUT_DIR="./runs/vars_for_pds"
 export CUDA_LAUNCH_BLOCKING=1
 export TORCH_USE_CUDA_DSA=1
@@ -10,7 +11,7 @@ accelerate launch --mixed_precision="no" train_rec.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --output_dir=$OUTPUT_DIR \
   --train_data_path=$TRAIN_DATA_PATH \
-  --val_data_path=$VAL_DATA_PATH \
+  --val_data_path=$TRAIN_DATA_PATH \
   --train_json_path=$TRAIN_JSON_PATH \
   --resolution=512 \
   --random_flip \
@@ -24,5 +25,5 @@ accelerate launch --mixed_precision="no" train_rec.py \
   --seed=42 \
   --checkpoints_total_limit 2 \
   --validation_prompt="a cute bear" \
-  --lighting_layers=8 \
-    # --val_json_path=$VAL_JSON_PATH \
+  --lighting_layers=4 \
+  --val_json_path=$VAL_JSON_PATH

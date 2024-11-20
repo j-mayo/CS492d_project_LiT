@@ -43,6 +43,7 @@ from torchvision import transforms
 from tqdm.auto import tqdm
 from utils.utils import image_grid
 from transformers import CLIPTextModel, CLIPTokenizer
+from torchvision import transforms
 
 import diffusers
 from diffusers import AutoencoderKL, DDPMScheduler, DiffusionPipeline, StableDiffusionPipeline, UNet2DConditionModel
@@ -56,8 +57,8 @@ from diffusers.utils.torch_utils import is_compiled_module
 # from ..ldm.modules.encoders.modules import LightFieldEncoder  # added
 from glob import glob
 from encoder import LightingEncoder
-from utils.dataloader import LitDataset
-from utils.modifiedstablediffusionimg2imgpipeline import ModifiedStableDiffusionImg2ImgPipeline
+from utils.dataloader_rec import LitDataset
+from utils.StableRelight import StableRelight
 
 if is_wandb_available():
     import wandb
@@ -108,21 +109,23 @@ def log_validation(
         #         "validation_prompt": args.validation_prompt
         #     }
         # )
+        from termcolor import cprint
+        
         if val_dataloader is not None:
             for batch in val_dataloader:
                 image = pipeline(
                     image=batch["src_img"],
-                light_conditioning=batch["tgt_condition"],
-                pose_conditioning=batch["pose"],
-                negative_light_conditioning=batch["src_condition"],
-                negative_pose_conditioning=batch["pose"]
-            ).images[0]
-            images.append(image)
+                    light_conditioning=batch["tgt_condition"],
+                    pose_conditioning=batch["pose"],
+                    negative_light_conditioning=batch["src_condition"],
+                    negative_pose_conditioning=batch["pose"]
+                ).images[0]
+                images.append(image)
             
-            val_error = torch.mean((batch["tgt_img"] - image)**2).item()
-            val_error_list.append(val_error)
-            image_logs.append(
-                {
+                val_error = torch.mean((batch["tgt_img"] - transforms.ToTensor()(image)to(batch["tgt_img"].device))**2).item()
+                val_error_list.append(val_error)
+                image_logs.append(
+                    {
                     "images": [batch["tgt_img"], image],
                     "val_error": val_error
                     }
@@ -135,12 +138,23 @@ def log_validation(
                 negative_light_conditioning=batch["src_condition"],
                 negative_pose_conditioning=batch["pose"]
             ).images[0]
+            images.append(image)
+
+            val_error = torch.mean((batch["tgt_img"] - transforms.ToTensor()(image).to(batch["tgt_img"].device))**2).item()
+            val_error_list.append(val_error)
+            image_logs.append({
+                "images": [batch["tgt_img"], image],
+                "val_error": val_error
+                })
+        else:
+            raise ValueError
     # Save the concatenated validation output
     if save_dir is not None:
         image_list = []
         for image_log in image_logs:
             tgt_image = image_log["images"][0]
             image = image_log["images"][1]
+
             image_concat = image_grid([tgt_image, image], 1, 2)
             image_list.append(image_concat)
         
@@ -165,6 +179,8 @@ def log_validation(
     #             }
     #         )
     return images
+
+print(f"log_validation function id: {id(log_validation)}")
 
 
 def parse_args():
@@ -650,7 +666,9 @@ def main():
         "NA3": 0, "NE7": 1, "CB5": 2, "CF8": 3, "NA7": 4, "CC7": 5, "CA2": 6, "NE1": 7, "NC3": 8, "CE2": 9
     }
     train_dataset = LitDataset(args.train_data_path, args.train_json_path, pose_map, train_transforms)    
-    val_dataset = LitDataset(args.val_data_path, args.val_json_path, pose_map, train_transforms) if args.val_json_path is not None and args.val_data_path is not None else None
+    val_dataset = LitDataset(args.val_data_path, args.val_json_path, pose_map, train_transforms) #if args.val_json_path is not None and args.val_data_path is not None else None
+
+    #val_dataset = LitDataset(args.train_data_path, args.train_json_path, pose_map, train_transforms)
 
 
     # # Preprocessing the datasets.
@@ -715,6 +733,7 @@ def main():
         batch_size=args.val_batch_size,
         num_workers=args.dataloader_num_workers,
     )
+    #from termcolor import cprint
     ###################
     # Scheduler and math around the number of training steps.
     # Check the PR https://github.com/huggingface/diffusers/pull/8312 for detailed explanation.
@@ -811,7 +830,7 @@ def main():
         unet.train()
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
-            break
+            if step > 1: break
             with accelerator.accumulate(unet):
 
                 # Convert src images to latent space
@@ -830,9 +849,9 @@ def main():
                         (src_latents.shape[0], src_latents.shape[1], 1, 1), device=src_latents.device
                     )
 
-                bsz = src_latents.shape[0]
+                bsz = tgt_latents.shape[0]
                 # Sample a random timestep for each image
-                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=src_latents.device)
+                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=tgt_latents.device)
                 timesteps = timesteps.long()
 
                 # Add noise to the latents according to the noise magnitude at each timestep
@@ -844,16 +863,8 @@ def main():
                 # encoder_hidden_states = text_encoder(batch["input_ids"], return_dict=False)[0]
 
                 src_cond, tgt_cond = batch["src_condition"], batch["tgt_condition"]
-                src_encoder_hidden_states = light_encoder(batch["src_condition"], batch["pose"])
-                src_encoder_hidden_states = src_encoder_hidden_states.unsqueeze(1)
                 tgt_encoder_hidden_states = light_encoder(batch["tgt_condition"], batch["pose"])
-                tgt_encoder_hidden_states = tgt_encoder_hidden_states.unsqueeze(1)
-                # print(src_encoder_hidden_states.shape, src_encoder_hidden_states.device, tgt_encoder_hidden_states.shape, tgt_encoder_hidden_states.device)
-                # import pdb; pdb.set_trace()
-                encoder_hidden_states = torch.cat((src_encoder_hidden_states, tgt_encoder_hidden_states), dim=0) # concat embeddings
-                #import pdb; pdb.set_trace()
-                # encoder는 src의 lighting과 tgt lighting을 전부 받도록 고려함... 일단은.
-
+                #tgt_encoder_hidden_states = tgt_encoder_hidden_states.unsqueeze(1)
 
                 # Get the target for loss depending on the prediction type
                 if args.prediction_type is not None:
@@ -869,7 +880,7 @@ def main():
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
                 # Predict the noise residual and compute loss
-                model_pred = unet(noisy_src_latents, timesteps, encoder_hidden_states, return_dict=False)[0]
+                model_pred = unet(noisy_src_latents, timesteps, tgt_encoder_hidden_states, return_dict=False)[0]
 
                 if args.snr_gamma is None:
                     loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
@@ -957,18 +968,10 @@ def main():
         if accelerator.is_main_process:
             if (
                 # val_dataloader is not None and 
-                epoch % args.validation_epochs == 0
+                epoch % 1 == 0 #args.validation_epochs == 0
             ):
-                # create pipeline
-                # pipeline = DiffusionPipeline.from_pretrained(
-                #     args.pretrained_model_name_or_path,
-                #     unet=unwrap_model(unet),
-                #     revision=args.revision,
-                #     variant=args.variant,
-                #     torch_dtype=weight_dtype,
-                # )
                 with torch.no_grad():
-                    pipeline = ModifiedStableDiffusionImg2ImgPipeline.from_pretrained(
+                    pipeline = StableRelight.from_pretrained(
                         args.pretrained_model_name_or_path,
                         unet=unwrap_model(unet),
                         revision=args.revision,
@@ -978,13 +981,13 @@ def main():
                     light_encoder.eval()
                     pipeline.add_light_encoder(light_encoder)
                     
+                    print(f"log_validation function id: {id(log_validation)}")
                     images = log_validation(
                         pipeline, 
                         args, 
                         accelerator, 
                         epoch,
                         batch=batch,
-                        #guidance_scale=0.0,
                         save_dir=os.path.join(args.output_dir, "validation")
                     )
 
@@ -1009,9 +1012,11 @@ def main():
         # Final inference
         # Load previous pipeline
         # use val data.
+        """
         if val_dataloader is not None:
+            for step, batch in enumerate(train_dataloader):
             with torch.no_grad():
-                    pipeline = ModifiedStableDiffusionImg2ImgPipeline.from_pretrained(
+                    pipeline = StableRelight.from_pretrained(
                         args.pretrained_model_name_or_path,
                         revision=args.revision,
                         variant=args.variant,
@@ -1022,16 +1027,17 @@ def main():
                     pipeline.add_light_encoder(light_encoder)
                     
                     images = log_validation(
-                        pipeline, 
-                        args, 
-                        accelerator, 
-                        epoch,
+                        pipeline=pipeline, 
+                        args=args, 
+                        accelerator=accelerator, 
+                        epoch=epoch,
+                        is_final_validation=False,
                         val_dataloader=val_dataloader,
                         save_dir=os.path.join(args.output_dir, "validation")
                     )
 
                     del pipeline
-
+            """
             # pipeline = DiffusionPipeline.from_pretrained(
             #     args.pretrained_model_name_or_path,
             #     revision=args.revision,
