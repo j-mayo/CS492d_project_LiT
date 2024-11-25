@@ -64,6 +64,24 @@ class AutoConvertAttnBlock(nn.Module):
             out = out.reshape(goal_shape[0], goal_shape[3], goal_shape[2], goal_shape[1]).permute(0, 3, 2, 1)
         return out
         
+class Block(nn.Module):
+    def __init__(self, input_channels, output_channels, strides, max_styles):
+        super().__init__()
+        self.conv = nn.Conv1d(input_channels,
+                              output_channels,
+                              kernel_size=2*strides,
+                              stride=strides,
+                              padding=0)
+        self.norm = StyleIN(input_channels, (1,), max_styles=max_styles)
+        self.act = nn.ReLU()
+        self.rezero = nn.Parameter(torch.Tensor([0.]))
+        self.skip = nn.Identity() if input_channels == output_channels else nn.Conv2d(input_channels, output_channels, 1, 1, 0)
+        self.pool = nn.MaxPool1d(kernel_size=4, stride=2, padding=0)
+    def forward(self, x, y):
+        res = self.conv(self.act(self.norm(x, y)))
+        out = (res * self.rezero) + self.skip(self.pool(x))
+        return out
+
 
 class Module(nn.Module):
     def __init__(self, num_layers, input_channels, embedding_dim, num_poses):
@@ -76,17 +94,15 @@ class Module(nn.Module):
             PatchBlock(channels[i][0], channels[i][1], strides=2, max_styles=num_poses)
             for i in range(num_layers)])
         
-        layers = itertools.chain(*[
-            [AutoConvertAttnBlock(embedding_dim, embedding_dim//128, max_styles=num_poses, recover_shape=True),
-            PatchBlock(embedding_dim, embedding_dim, strides=2, max_styles=num_poses)] for _ in range(2)])
-        self.layers = SequentialWithArgs(*layers)
+        self.mix = AutoConvertAttnBlock(embedding_dim, embedding_dim//128, max_styles=num_poses, recover_shape=False)
+        self.final = Block(embedding_dim, embedding_dim, strides=2, max_styles=num_poses)
         self.finish = nn.Sequential(nn.ReLU(), nn.Linear(embedding_dim, embedding_dim))
         self.embdim = embedding_dim
     
     def forward(self, x, pose):
         reduced = self.patches(x, pose)
-        tensor = self.layers(reduced, pose)
-        tensor = tensor.permute(0, 3, 2, 1).reshape(tensor.size(0), -1, self.embdim)
+        tensor = self.mix(reduced, pose)
+        #tensor = tensor.permute(0, 3, 2, 1).reshape(tensor.size(0), -1, self.embdim)
         output = self.finish(tensor)
         return output
         
