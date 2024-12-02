@@ -1,8 +1,0 @@
-.venv/*
-runs/*
-*__pycache__*
-*/checkpoint/*
-Distillation/*
-__pycache__/*
-*/lightenc_save/*
-*/lighting_encoder/*
