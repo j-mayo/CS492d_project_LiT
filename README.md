@@ -26,5 +26,5 @@ For our code and model variables, please refer to our hugging face repository [D
 
 ## Team Information
 - [Junwoo Choi](https://github.com/Str4Strength) (School of Computing, KAIST)
-- [Jaeyo Shin](https://github.com/jaeyomayo) (Graduate School of AI, KAIST)
+- [Jaeyo Shin](https://github.com/j-mayo) (Graduate School of AI, KAIST)
 - [Dongwon Choi](https://github.com/chlehdwon) (Graduate School of AI, KAIST)
