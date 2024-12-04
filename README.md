@@ -11,6 +11,7 @@ This is a **Team03** official repository of the project in the KAIST 2024 Fall C
 We used [OpenIllumination](https://oppo-us-research.github.io/OpenIllumination/) dataset for our project, and [LiT](https://github.com/KAIST-Visual-AI-Group/Diffusion-Project-Illumination) project repo for downloading and pre-processing. 
 
 The image below shows the environment map of each light condition, which we used to encode the light condition.
+
 <img src="https://github.com/user-attachments/assets/7e51df4c-8585-4167-8db6-78e9ecbf1032" width="500" height="200">
 
 ## Qualitative Results
