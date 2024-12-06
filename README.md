@@ -1,5 +1,5 @@
 # 🔦LightTransporter🚀​ (2024 Fall CS492D Final Project)  
-## [**Poster**](https://drive.google.com/file/d/101eOfUqfS-wKGuJPvaqoBtKvs4GrIywM/view?usp=sharing) | [**Report**](https://drive.google.com/file/d/1009QskpqLxJRltqiCnim5seDmX1nxwEL/view?usp=sharing) | [**HuggingFace**](https://huggingface.co/TechnicalOrganization/DiffRelight-OpenIllumination/tree/main)
+## [**Poster**](https://drive.google.com/file/d/101eOfUqfS-wKGuJPvaqoBtKvs4GrIywM/view?usp=sharing) | [**Report**](https://drive.google.com/file/d/1009QskpqLxJRltqiCnim5seDmX1nxwEL/view?usp=sharing) | [**HuggingFace**](https://huggingface.co/LightTransporter/DiffRelight-OpenIllumination)
 > <b>KAIST 2024 Fall CS492D: Diffusion Models and Their Applications</b>
 
 ![Project_Poster_20170693_20244300_20244496](https://github.com/user-attachments/assets/5a5c0e45-d6f8-4942-91e5-7245f3c0f5f7)
